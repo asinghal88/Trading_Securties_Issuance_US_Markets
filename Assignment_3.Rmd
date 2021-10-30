@@ -2,7 +2,7 @@
 title: "Assignment_3"
 author: "Anshul Singhal"
 date: "9/10/2021"
-output: html_document
+output: github_document
 ---
 ```{r include = FALSE}
 library(dplyr)
