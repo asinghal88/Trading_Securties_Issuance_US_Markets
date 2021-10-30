@@ -1,0 +1,715 @@
+---
+title: "Assignment_3"
+author: "Anshul Singhal"
+date: "9/10/2021"
+output: html_document
+---
+```{r include = FALSE}
+library(dplyr)
+library(data.table)
+library(zeallot)
+library(lubridate)
+library(plotly)
+library(openxlsx)
+library(readxl)
+library(zoo)
+library(scales)
+library(geckor)
+library(fredr)
+library(tidyquant)
+library(tidyr)
+library(naniar)
+fredr_set_key("669c24e3e2c8136b6db6b3c978104993")
+```
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+path = "data_directory/"
+not_all_na = function(x) any(!is.na(x))
+#Function for cleaning data step 1
+transformed_data = function(data){
+  if(any(grepl("[A-Za-z]", colnames(data)[2:length(colnames(data))]))){
+    for(i in 1:ncol(data)){
+      if(is.na(data[1,i])){
+        copy = colnames(data)[i+1]
+      }
+      else{
+        colnames(data)[i] = copy
+      }
+    }
+    names(data) = paste(names(data),data[1,],sep = "_")
+  }
+  else{
+    colnames(data) = data[1,]
+    data = data[-1, ] 
+  }
+  data_new = data %>% mutate_if(is.character, as.numeric)
+  names(data_new)[1] = "Date"
+  na_rows = data_new %>% 
+            select(-Date) %>% 
+            is.na() %>% 
+            rowSums() != (ncol(data_new)-1)
+  data_new = data_new %>% 
+    filter(na_rows)
+  # data_new = filter(data_new,rowSums(is.na(data_new)) != ncol(data_new))
+  data_new = select_if(data_new,not_all_na)
+  return (data_new)
+}
+
+
+```
+
+```{r}
+#Two types of function for cleaning data
+clean_data_type1 = function(filename, sheetname, skip_rows,end_col_index,end_row_index,start_row_index = 1,volume_data = 0){
+    uncleaned_data = read_excel(paste0(path,filename), sheet = sheetname, skip = skip_rows, col_names = TRUE)%>%
+    select(1:end_col_index) %>%
+    rename(Date = `...1`) 
+    if (volume_data == 0){
+      uncleaned_data = uncleaned_data%>%mutate(Date = as.Date(parse_date_time(Date, orders = "Y")))
+    }else{
+      uncleaned_data = uncleaned_data%>%mutate(Date = as.Date(strtoi(Date),origin = "1899-12-30"))
+    }
+  if(volume_data == 0){
+    uncleaned_data = slice(uncleaned_data,start_row_index:end_row_index)
+  }else{
+    uncleaned_data = slice(uncleaned_data,1,start_row_index:end_row_index)
+  }
+  cleaned_data = transformed_data(uncleaned_data)
+  return (cleaned_data)
+}
+#type 2 function for cleaning data 
+clean_data_type2 = function(filename, sheetname, skip_rows,end_col_index,end_row_index,start_row_index = 1){
+  uncleaned_data = read_excel(paste0(path,filename), sheet = sheetname, skip = skip_rows, col_names = TRUE)%>%
+    select(1:end_col_index) %>%
+    slice(start_row_index:end_row_index)
+  names(uncleaned_data)[1] = "Date" 
+  uncleaned_data[1,1] = NA
+  uncleaned_data$Date = as.Date(parse_date_time(uncleaned_data$Date, orders = "Y"))
+  cleaned_data = transformed_data(uncleaned_data)
+  return (cleaned_data)
+}
+#Generate Summary for the securities in the market
+get_summary = function(data,columns){
+  descriptive_stats = summary(data[columns])
+  count_N = colSums(!is.na(data[columns]))
+  std = apply(data[columns],2,sd,na.rm = TRUE)
+  return (list(descriptive_stats,count_N,std))
+}
+#Generate Correlation Heat map
+get_heatmap = function(dat,columns,col_name){
+  corr = round(x = cor(dat[columns],use = "complete.obs"), digits = 2)
+  melted_corr = reshape2::melt(corr)
+  heatplot = ggplot(data = melted_corr, aes(x=Var1, y=Var2, fill = value)) +
+    geom_tile(color = "white")+
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5),axis.text.x = element_text(angle=45, hjust=1)) +
+    labs(title = paste0("Correlation Heatmap for ",col_name))+
+    coord_fixed()
+  ggplotly(heatplot)
+}
+#Plot stacked bar chart for different securities over time period
+plot_stacked_chart = function(dat1,columns,title_name,crypto_flag = 0){
+  dat1 = reshape2::melt(dat1[columns], id.vars = 'Date', variable.name = 'Type')
+  if(crypto_flag == 1)
+    dat1$value = dat1$value/1000000000
+  stacked_plot = ggplot(dat1) +
+        geom_bar(aes(x=Date,y=value,fill=Type),
+        stat='identity')+
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5)) + 
+        labs(title = title_name, x = "Date", y =   "$ Billion",color = "")
+  ggplotly(stacked_plot)
+}
+#Plot the multiple line charts for the securities along with the macro-economic indicators
+plot_multiple_line_chart = function(dat1, title_type,y1_type,macro_flag = 0) {
+  if(macro_flag == 0){
+    cols_taken = ncol(dat1)
+  }else{
+    cols_taken = ncol(dat1)-1
+  }
+  plot_y <- dat1 %>% plot_ly()
+  for(i in c(2:ncol(dat1))) {
+    if (i <= cols_taken) {
+      x = plot_y %>% add_trace(x = ~Date, y=dat1[[i]],  mode="lines" ,type = 'scatter', name=colnames(dat1)[i], yaxis='y1')
+    } else if(macro_flag != 0){
+      x = plot_y %>% add_trace(x = ~Date, y=dat1[[i]], mode="lines", type = 'scatter', name=colnames(dat1)[i], yaxis='y2') 
+    }
+    plot_y = x
+  }
+  if(macro_flag != 0)
+  {
+      plot_y %>% 
+      layout(title = paste0(title_type,"(LHS) vs Macro economic variable (RHS)"),
+         barmode   = 'relative', 
+         xaxis     = list(title=''),
+         margin    = list(l = 75, r = 75, b = 50, t = 50, pad = 4),
+         xaxis     = list(title = ""),
+         yaxis     = list(side = 'left', 
+                       title = y1_type, 
+                       showgrid = FALSE, 
+                       zeroline = TRUE, 
+                       color = 'steelblue'),
+         yaxis2    = list(side = 'right', 
+                       overlaying = "y", 
+                       title = colnames(dat1)[ncol(dat1)], 
+                       showgrid = TRUE, 
+                       zeroline = FALSE,
+                       ticksuffix = "%", 
+                       color = "#ffa500"),
+         legend = list(traceorder = 'reversed',orientation = "h"))
+  }
+  else{
+    plot_y %>% 
+    layout(title = paste0(title_type," Data"),
+       barmode   = 'relative', 
+       xaxis     = list(title=''),
+       margin    = list(l = 75, r = 75, b = 50, t = 50, pad = 4),
+       xaxis     = list(title = ""),
+       yaxis     = list(side = 'left', 
+                       title = y1_type, 
+                       showgrid = FALSE, 
+                       zeroline = TRUE, 
+                       color = 'steelblue'),
+       legend = list(traceorder = 'reversed',orientation = "h"))
+  }
+}
+#Plot all the possible combination in the excel sheets
+plot_all = function(sheet_lists,sheet_name,indicator_list){
+  for (i in 1:length(sheet_lists)){
+    for (j in 1:length(indicator_list)){
+      if(i != 3){
+        y1type = "$ Billion"
+      }else{
+        y1type = "% Rate" 
+      }
+    print(plot_multiple_line_chart(merge(sheet_lists[[i]],indicator_list[[j]],by = "Date"),sheet_name[[i]],y1type,1))
+    }
+  }
+}
+#Get cross market correlation(Inter-Market Correlation)
+get_Cross_Market_Correlation = function(merged_variables,merged_names){
+  for(i in 1:length(merged_variables)){
+     merge_set = merged_variables[[i]]
+     names(merge_set)[ncol(merge_set)] = merged_names[[i]]
+     merge_set = merge_set[c("Date",names(merge_set)[ncol(merge_set)])]
+     if(i == 1){
+       mergedData = merge_set
+     }
+     else
+     {
+       mergedData = merge(mergedData,merge_set,by = "Date",all = TRUE)
+     }
+  }
+  return (mergedData)
+}
+```
+
+```{r}
+#Get macroeconomic data which is used for all the parts
+
+ten_minus_two_note_monthly <- 
+   "T10Y2YM" %>% 
+  tq_get(get = "economic.data", from = "1979-01-01") %>% 
+  select(Date = date, `Ten Yr Minus Two Yr Monthly Rate` =  price)
+
+unemployment_rate <- 
+  "LNS14000024" %>% 
+  tq_get(get = "economic.data", from = "1979-01-01") %>% 
+  select(Date = date, `Unemployment Rate`  =  price)
+
+
+five_yr_forward_expected_inflation_rate <- 
+  "T5YIFRM" %>% 
+  tq_get(get = "economic.data", from = "1979-01-01") %>% 
+  select(Date = date, `5 Yr Forward Expected Inflation Rate`  =  price)
+
+economic_indicators = list(ten_minus_two_note_monthly,unemployment_rate,five_yr_forward_expected_inflation_rate)
+
+```
+
+```{r}
+##Part a for average daily monthly trading volume for different markets
+#Treasuries Trading Volume
+filename = "ta-us-treasury-trading-volume-sifma.xls"
+treasuries_monthly_volume = read_excel(paste0(path,filename), sheet = 'Monthly', skip = 3, col_names = TRUE) %>% 
+  slice(7:236)%>% 
+  rename(Date = `...1`) %>% 
+  mutate(Date = as.Date(strtoi(Date),origin = "1899-12-30")) 
+treasuries_monthly_volume = treasuries_monthly_volume %>% mutate_if(is.character, as.numeric)
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+treasuries_monthly_volume_stats = get_summary(treasuries_monthly_volume,colnames(treasuries_monthly_volume)[2:length(colnames(treasuries_monthly_volume))])
+
+#Heatmap for the above
+#If not able to see the heatmap please click on show in next window. It will zoom the plot
+get_heatmap(treasuries_monthly_volume,colnames(treasuries_monthly_volume)[2:length(colnames(treasuries_monthly_volume))],"Treasuries Average Daily Monthly Trading Volume")
+
+#Plotting stacked charts over time
+plot_stacked_chart(treasuries_monthly_volume,colnames(treasuries_monthly_volume)[1:length(colnames(treasuries_monthly_volume))-1],"Treasuries Average Daily Monthly Trading Volume")
+
+#Change the every month date to starting of that month so when joining with Economic Indicator it doesn't give any error
+treasuries_monthly_volume$Date = floor_date(treasuries_monthly_volume$Date, "month")
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(treasuries_monthly_volume)
+sheet_name = list("Treasuries Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#PrimaryDealer Financing
+filename = "Funding-US-Repo-SIFMA.xlsx"
+primary_dealer_monthly_volume = read_excel(paste0(path,filename), sheet = 'PrimaryDealer', skip = 3, col_names = TRUE) %>% 
+  select(1:11)%>% 
+  slice(1,87:190)%>% 
+  rename(Date = `...1`) %>% 
+  fill(Date)
+primary_dealer_monthly_volume$Date = paste0(primary_dealer_monthly_volume$Date,"-",primary_dealer_monthly_volume$...2)
+primary_dealer_monthly_volume$Date = as.Date(parse_date_time(primary_dealer_monthly_volume$Date, orders = "Y-m")) 
+primary_dealer_monthly_volume$...2 = NULL
+primary_dealer_monthly_volume = transformed_data(primary_dealer_monthly_volume)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+primary_dealer_monthly_volume_stats = get_summary(primary_dealer_monthly_volume,colnames(primary_dealer_monthly_volume)[2:length(colnames(primary_dealer_monthly_volume))])
+
+#Heatmap for the above
+get_heatmap(primary_dealer_monthly_volume,colnames(primary_dealer_monthly_volume)[2:length(colnames(primary_dealer_monthly_volume))],"Primary Dealer Average Daily Monthly Trading Volume")
+
+#Plotting stacked charts over time
+plot_stacked_chart(primary_dealer_monthly_volume,colnames(primary_dealer_monthly_volume)[1:length(colnames(primary_dealer_monthly_volume))-1],"Primary Dealer Average Daily Monthly Trading Volume")
+
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(primary_dealer_monthly_volume)
+sheet_name = list("Primary Dealer Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+```
+
+```{r}
+#Equity Average Trading Daily Monthly Volume
+filename = "US-Equities-and-Related-Statistics-SIFMA.xlsx"
+equity_monthly_volume = clean_data_type1(filename,"ADV $",7,12,63,32,1)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+equity_monthly_volume_stats = get_summary(equity_monthly_volume,colnames(equity_monthly_volume)[2:length(colnames(equity_monthly_volume))])
+
+#Heatmap for the above
+get_heatmap(equity_monthly_volume,colnames(equity_monthly_volume)[2:length(colnames(equity_monthly_volume))],"Equity Average Daily Monthly Trading Volume")
+
+#Plotting line chart over time
+plot_multiple_line_chart(equity_monthly_volume,"Equity Average Daily Monthly Trading Volume","$ Billion")
+
+#Change the every month date to starting of that month so when joining with Economic Indicator it doesn't give any error
+equity_monthly_volume$Date = floor_date(equity_monthly_volume$Date, "month")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(equity_monthly_volume)
+sheet_name = list("Equity Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#Fixed-Income Average Trading Daily Monthly Volume
+filename = "US-Fixed-Income-Securities-Statistics-SIFMA.xlsx"
+fixed_income_monthly_volume = clean_data_type1(filename,"Trading Volume",6,9,74,44,1)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+fixed_income_monthly_volume_stats = get_summary(fixed_income_monthly_volume,colnames(fixed_income_monthly_volume)[2:length(colnames(fixed_income_monthly_volume))])
+
+#Heatmap for the above
+get_heatmap(fixed_income_monthly_volume,colnames(fixed_income_monthly_volume)[2:length(colnames(fixed_income_monthly_volume))],"Fixed-Income Average Daily Monthly Trading Volume")
+
+#Plotting stacked charts over time
+plot_stacked_chart(fixed_income_monthly_volume,colnames(fixed_income_monthly_volume)[1:length(colnames(fixed_income_monthly_volume))-1],"Fixed-Income Average Daily Monthly Trading Volume")
+
+#Change the every month date to starting of that month so when joining with Economic Indicator it doesn't give any error
+fixed_income_monthly_volume$Date = floor_date(fixed_income_monthly_volume$Date, "month")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(fixed_income_monthly_volume)
+sheet_name = list("Fixed-Income Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#US SF Average Monthly Trading Volume
+filename = "sf-us-sf-trading-volume-sifma.xls"
+sf_monthly_volume = read_excel(paste0(path,filename), sheet = 'Historical Agency', skip = 3, col_names = TRUE) %>% 
+  slice(2,12:241)%>% 
+  rename(Date = `...1`)
+sf_monthly_volume[1,1] = NA
+
+sf_monthly_volume$Date = as.Date(strtoi(sf_monthly_volume$Date),origin = "1899-12-30")
+
+#Breaking data into two PrimaryDealers and FINRA as there is no common observation for all columns to run further analysis.
+sf_primary_dealer_volume = sf_monthly_volume[,1:4]
+sf_finra_volume  = sf_monthly_volume[,c(1,5:ncol(sf_monthly_volume))]
+sf_primary_dealer_volume = transformed_data(sf_primary_dealer_volume)
+sf_finra_volume = transformed_data(sf_finra_volume)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+sf_primary_dealer_volume_stats = get_summary(sf_primary_dealer_volume,colnames(sf_primary_dealer_volume)[2:length(colnames(sf_primary_dealer_volume))])
+
+sf_finra_volume_stats = get_summary(sf_finra_volume,colnames(sf_finra_volume)[2:length(colnames(sf_finra_volume))])
+
+#Heatmap for the above two are:
+get_heatmap(sf_primary_dealer_volume,colnames(sf_primary_dealer_volume)[2:length(colnames(sf_primary_dealer_volume))],"SF Primary Dealer Average Daily Monthly Trading Volume")
+
+get_heatmap(sf_finra_volume,colnames(sf_finra_volume)[2:length(colnames(sf_finra_volume))],"SF FINRA Average Daily Monthly Trading Volume")
+
+#Plotting line chart over time
+plot_multiple_line_chart(sf_primary_dealer_volume,"SF Primary Dealer Average Daily Monthly Trading Volume","$ Billion")
+
+plot_multiple_line_chart(sf_finra_volume,"SF FINRA Average Daily Monthly Trading Volume","$ Billion")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(sf_primary_dealer_volume,sf_finra_volume)
+sheet_name = list("SF Primary Dealer Average Daily Monthly Trading Volume","SF FINRA Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+
+```{r}
+#Agency Average Daily Monthly Trading Volume
+filename = "ta-us-agency-trading-volume-sifma.xls"
+agency_monthly_volume = read_excel(paste0(path,filename), sheet = "Trading Volume", skip = 8, col_names = TRUE) %>% 
+  slice(1:127)%>% 
+  rename(Date = `...1`)
+agency_monthly_volume$Date = as.Date(strtoi(agency_monthly_volume$Date),origin = "1899-12-30")
+agency_monthly_volume = transformed_data(agency_monthly_volume)
+
+agency_monthly_volume_stats = get_summary(agency_monthly_volume,colnames(agency_monthly_volume)[2:length(colnames(agency_monthly_volume))])
+
+#Heatmap for the above two are:
+get_heatmap(agency_monthly_volume,colnames(agency_monthly_volume)[2:length(colnames(agency_monthly_volume))],"Agency Average Daily Monthly Trading Volume")
+
+#Plotting stacked charts over time
+plot_stacked_chart(agency_monthly_volume,colnames(agency_monthly_volume)[1:length(colnames(agency_monthly_volume))-1],"Agency Average Daily Monthly Trading Volume")
+
+
+#Change the every month date to starting of that month so when joining with Economic Indicator it doesn't give any error
+agency_monthly_volume$Date = floor_date(agency_monthly_volume$Date, "month")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(agency_monthly_volume)
+sheet_name = list("Agency Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+
+```
+
+```{r}
+#Corporate Bond Average Daily Monthly Trading Volume
+
+filename = "corporate-us-corporate-trading-volume-sifma.xls"
+corporate_bond_volume = read_excel(paste0(path,filename), sheet = "TRACE", skip = 8, col_names = TRUE) %>% 
+  slice(1:189)%>% 
+  rename(Date = `...1`)
+corporate_bond_volume$Date = as.Date(strtoi(corporate_bond_volume$Date),origin = "1899-12-30")
+corporate_bond_volume = transformed_data(corporate_bond_volume)
+
+corporate_bond_volume_stats = get_summary(corporate_bond_volume,colnames(corporate_bond_volume)[2:length(colnames(corporate_bond_volume))])
+
+#Heatmap for the above:
+get_heatmap(corporate_bond_volume,colnames(corporate_bond_volume)[2:length(colnames(corporate_bond_volume))],"Corporate Bond Average Daily Monthly Trading Volume")
+
+
+#Plotting line chart over time
+plot_multiple_line_chart(corporate_bond_volume,"Corporate Bond Average Daily Monthly Trading Volume","$ Billion")
+
+
+#Change the every month date to starting of that month so when joining with Economic Indicator it doesn't give any error
+corporate_bond_volume$Date = floor_date(corporate_bond_volume$Date, "month")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(corporate_bond_volume)
+sheet_name = list("Corporate Bond Average Daily Monthly Trading Volume")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#Correlation across markets
+#Heatmap for the above
+sf_monthly_volume = transformed_data(sf_monthly_volume)
+
+modified_sf_monthly_volume = copy(sf_monthly_volume)
+modified_sf_monthly_volume$SF_Total = rowSums(sf_monthly_volume[,c(4,8,18)], na.rm=TRUE)
+modified_sf_monthly_volume = modified_sf_monthly_volume[c(1,ncol(modified_sf_monthly_volume))]
+
+modified_corp_bond_volume = copy(corporate_bond_volume)
+modified_corp_bond_volume$Corp_Total = rowSums(modified_corp_bond_volume[,c(4,7,10,11)], na.rm=TRUE)
+modified_corp_bond_volume = modified_corp_bond_volume[c(1,ncol(modified_corp_bond_volume))]
+
+merge_trading_volume = list(treasuries_monthly_volume,primary_dealer_monthly_volume,equity_monthly_volume,fixed_income_monthly_volume,modified_sf_monthly_volume,agency_monthly_volume,modified_corp_bond_volume)
+names_trading_volume = list("Treasuries","Primary Dealer","Equity","Fixed-Income","SF","Agency","Corporate Bond")
+mergedData = get_Cross_Market_Correlation(merge_trading_volume,names_trading_volume)
+get_heatmap(mergedData,colnames(mergedData)[2:length(colnames(mergedData))],"Total of all types of Market Volume Data")
+
+```
+
+```{r}
+##Part b for issuance and outstanding annual data start
+#US Treasury Issuance, Outstanding and Interest Rates
+filename = "US-Treasury-Securities-Statistics-SIFMA.xlsx"
+treasuries_issuance = clean_data_type1(filename,"Issuance Net",7,16,22)
+treasuries_outstanding = clean_data_type1(filename,"Outstanding",6,7,32)
+treasuries_interest_rates = clean_data_type1(filename,"Yield Curve Rates",6,4,33,2)
+
+#Summary for the above two(p25, median, p75, mean, count(N) and standard deviation)
+treasuries_issuance_stats = get_summary(treasuries_issuance,colnames(treasuries_issuance)[2:length(colnames(treasuries_issuance))])
+treasuries_outstanding_stats = get_summary(treasuries_outstanding,colnames(treasuries_outstanding)[2:length(colnames(treasuries_outstanding))])
+treasuries_interest_rates_stats = get_summary(treasuries_interest_rates,colnames(treasuries_interest_rates)[2:length(colnames(treasuries_interest_rates))])
+
+#Heatmap for the above three
+get_heatmap(treasuries_issuance,colnames(treasuries_issuance)[2:length(colnames(treasuries_issuance))],"Treasuries Issuance")
+get_heatmap(treasuries_outstanding,colnames(treasuries_outstanding)[2:length(colnames(treasuries_outstanding))],"Treasuries Outstanding")
+get_heatmap(treasuries_interest_rates,colnames(treasuries_interest_rates)[2:length(colnames(treasuries_interest_rates))],"Treasuries Interest Rates")
+
+#Plotting stacked charts over time
+plot_stacked_chart(treasuries_outstanding,colnames(treasuries_outstanding)[1:length(colnames(treasuries_outstanding))-1],"Treasuries Outstanding")
+#Plotting line chart over time
+plot_multiple_line_chart(treasuries_issuance,"Treasuries Issuance","$ Billion")
+plot_multiple_line_chart(treasuries_interest_rates,"Treasuries Interest Rates","% Rate")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(treasuries_issuance,treasuries_outstanding,treasuries_interest_rates)
+sheet_name = list("Treasuries Issuance","Treasuries Outstanding","Treasuries Interest Rates")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#US MBS Issuance and Outstanding
+filename = "US-Mortgage-Backed-Securities-Statistics-SIFMA.xlsx"
+mbs_issuance = clean_data_type2(filename,"MBS Issuance",17,10,26)
+mbs_outstanding = clean_data_type2(filename,"MBS Outstanding",16,10,20)
+
+#Summary for the above two(p25, median, p75, mean, count(N) and standard deviation)
+mbs_issuance_stats = get_summary(mbs_issuance,colnames(mbs_issuance)[2:length(colnames(mbs_issuance))])
+mbs_outstanding_stats = get_summary(mbs_outstanding,colnames(mbs_outstanding)[2:length(colnames(mbs_outstanding))])
+
+#Heatmap for the above two
+get_heatmap(mbs_issuance,colnames(mbs_issuance)[2:length(colnames(mbs_issuance))],"MBS Issuance")
+get_heatmap(mbs_outstanding,colnames(mbs_outstanding)[2:length(colnames(mbs_outstanding))],"MBS Outstanding")
+
+#Plotting stacked charts over time
+plot_stacked_chart(mbs_issuance,colnames(mbs_issuance)[c(1,6,7)],"MBS Issuance")
+plot_stacked_chart(mbs_outstanding,colnames(mbs_outstanding)[c(1,6,7)],"MBS Outstanding")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(mbs_issuance,mbs_issuance)
+sheet_name = list("MBS Issuance","MBS Outstanding")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#US ABS Issuance and Outstanding
+filename = "US-Asset-Backed-Securities-Statistics-SIFMA.xlsx"
+abs_issuance = clean_data_type2(filename,"ABS Issuance",9,8,37)
+abs_outstanding = clean_data_type2(filename,"ABS Outstanding",12,8,37)
+
+#Summary for the above two(p25, median, p75, mean, count(N) and standard deviation)
+abs_issuance_stats = get_summary(abs_issuance,colnames(abs_issuance)[2:length(colnames(abs_issuance))])
+abs_outstanding_stats = get_summary(abs_outstanding,colnames(abs_outstanding)[2:length(colnames(abs_outstanding))])
+
+#Heatmap for the above two
+get_heatmap(abs_issuance,colnames(abs_issuance)[2:length(colnames(abs_issuance))],"ABS Issuance")
+get_heatmap(abs_outstanding,colnames(abs_outstanding)[2:length(colnames(abs_outstanding))],"ABS Outstanding")
+
+#Plotting stacked charts over time
+plot_stacked_chart(abs_issuance,colnames(abs_issuance)[1:length(colnames(abs_issuance))-1],"ABS Issuance")
+plot_stacked_chart(abs_outstanding,colnames(abs_outstanding)[1:length(colnames(abs_outstanding))-1],"ABS Outstanding")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(abs_issuance,abs_outstanding)
+sheet_name = list("ABS Issuance","ABS Outstanding")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#US Fixed Income Issuance and Outstanding
+filename = "US-Fixed-Income-Securities-Statistics-SIFMA.xlsx"
+fixed_income_issuance = clean_data_type1(filename,"Issuance",6,8,26)
+fixed_income_outstanding = clean_data_type1(filename,"Outstanding",6,9,42)
+
+#Summary for the above two(p25, median, p75, mean, count(N) and standard deviation)
+fixed_income_issuance_stats = get_summary(fixed_income_issuance,colnames(fixed_income_issuance)[2:length(colnames(fixed_income_issuance))])
+fixed_income_outstanding_stats = get_summary(fixed_income_outstanding,colnames(fixed_income_outstanding)[2:length(colnames(fixed_income_outstanding))])
+
+#Heatmap for the above two
+get_heatmap(fixed_income_issuance,colnames(fixed_income_issuance)[2:length(colnames(fixed_income_issuance))],"Fixed-Income Issuance")
+get_heatmap(fixed_income_outstanding,colnames(fixed_income_outstanding)[2:length(colnames(fixed_income_outstanding))],"Fixed-Income Outstanding")
+
+#Plotting stacked charts over time
+plot_stacked_chart(fixed_income_issuance,colnames(fixed_income_issuance)[1:length(colnames(fixed_income_issuance))-1],"Fixed-Income Issuance")
+plot_stacked_chart(fixed_income_outstanding,colnames(fixed_income_outstanding)[1:length(colnames(fixed_income_outstanding))-1],"Fixed-Income Outstanding")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(fixed_income_issuance,fixed_income_outstanding)
+sheet_name = list("Fixed-Income Issuance","Fixed-Income Outstanding")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+
+```
+
+```{r}
+#US ABCP & OP Outstanding
+cp_outstanding = read_excel(paste0(path,"ABCP and OP.xls"), sheet = 'CP Outstanding', skip = 2, col_names = TRUE) %>% 
+  rename(Date = `...1`) %>% 
+  mutate(Date = as.Date(parse_date_time(Date, orders = "Y"))) %>% 
+  filter(row_number()<18)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+cp_outstanding_stats = get_summary(cp_outstanding,colnames(cp_outstanding)[2:length(colnames(cp_outstanding))])
+
+#Heatmap for the above
+get_heatmap(cp_outstanding,colnames(cp_outstanding)[2:length(colnames(cp_outstanding))],"CP Outstanding")
+
+#Plotting stacked charts over time
+plot_stacked_chart(cp_outstanding,colnames(cp_outstanding)[1:length(colnames(cp_outstanding))-1],"Commercial Paper Outstanding")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(cp_outstanding)
+sheet_name = list("Commercial Paper Outstanding")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
+
+```{r}
+#US Municipal Bonds Issuance
+filename = "US-Municipal-Bonds-Statistics-SIFMA.xlsx"
+muni_issuance = clean_data_type1(filename,"Issuance Total",7,12,26)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+muni_issuance_stats = get_summary(muni_issuance,colnames(muni_issuance)[2:length(colnames(muni_issuance))])
+
+#Heatmap for the above
+get_heatmap(muni_issuance,colnames(muni_issuance)[2:length(colnames(muni_issuance))],"Municipal Issuance")
+
+#Plotting line chart over time
+plot_multiple_line_chart(muni_issuance,"Municipal Issuance","$ Billion")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(muni_issuance)
+sheet_name = list("Municipal Issuance")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+```
+
+```{r}
+#US Corporate Bond Issuance
+filename = "US-Corporate-Bonds-Statistics-SIFMA.xlsx"
+corp_issuance = clean_data_type1(filename,"Issuance",7,14,26)
+
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+corp_issuance_stats = get_summary(corp_issuance,colnames(corp_issuance)[2:length(colnames(corp_issuance))])
+
+#Heatmap for the above
+get_heatmap(corp_issuance,colnames(corp_issuance)[2:length(colnames(corp_issuance))],"Corporate Bond Issuance")
+
+#Plotting line chart over time
+plot_multiple_line_chart(corp_issuance,"Corporate Bond Issuance","$ Billion")
+
+#Plotting graphs against each of the economic indicators
+sheet_lists = list(corp_issuance)
+sheet_name = list("Corporate Bond Issuance")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+```
+
+```{r}
+#Correlation across markets
+#Heatmap for the above
+merge_issuance = list(treasuries_issuance,mbs_issuance,abs_issuance,fixed_income_issuance,muni_issuance,corp_issuance)
+names_issuance = list("Treasuries","MBS","ABS","Fixed-Income","Municipal","Corporate Bond")
+mergedData = get_Cross_Market_Correlation(merge_issuance,names_issuance)
+get_heatmap(mergedData,colnames(mergedData)[2:length(colnames(mergedData))],"Total of all types of Issuance")
+
+merge_outstanding = list(treasuries_outstanding,mbs_outstanding,abs_outstanding,fixed_income_outstanding,cp_outstanding)
+names_issuance = list("Treasuries","MBS","ABS","Fixed-Income","Commercial Paper")
+mergedData = get_Cross_Market_Correlation(merge_outstanding,names_issuance)
+get_heatmap(mergedData,colnames(mergedData)[2:length(colnames(mergedData))],"Total of all types of Outstanding")
+
+
+```
+
+
+```{r}
+#part c
+#Getting crypto data from the geckor api
+get_cryptoData = function(crypto){
+  data  = coin_history(
+  coin_id = crypto,
+  vs_currency = "usd",
+  days = "max",
+  interval = "daily")
+  names(data)[5] = crypto
+  data = data[c("timestamp",names(data)[5])]
+return (data)
+}
+cryptos = c("bitcoin","ethereum","cardano","tether","binancecoin","solana","ripple","polkadot","dogecoin","usd-coin")
+#Writing the file if it's first time we encounter file otherwise we read the original file
+if(!file.exists("crypto_data.csv")){
+  for (i in 1:length(cryptos)){ 
+   data_set = get_cryptoData(cryptos[i])
+   if(i == 1){
+     final_data = data_set
+   }
+   else
+     {
+    final_data = merge(final_data,data_set,by = "timestamp",all = TRUE)
+   }
+  }
+  write.csv(final_data,"crypto_data.csv")
+}
+if(file.exists("crypto_data.csv")){
+  final_data = read.csv("crypto_data.csv",row.names = 1L, check.names = FALSE)
+}
+```
+
+```{r}
+#Line Plot for different cryptos over the period from 2018 to 2020. While the data is extracted from 2013
+#onwards, still the we have 0 total volume traded for bitcoin and other crypto data is available from very late. So, I have plotted from 2018 onwards.
+names(final_data)[1] = "Date"
+final_data$Date = as.Date(final_data$Date)
+final_data_1 <- reshape2::melt(final_data ,  id.vars = 'Date', variable.name = 'crypto_name')
+
+crypto_volume_plot = ggplot(final_data_1, aes(Date, value/1000000)) +
+  geom_line(aes(colour = crypto_name)) +
+  scale_y_continuous(labels = comma) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.2)) +
+  #to change the start date of the graph
+  scale_x_date(limits = c(min = ymd("2018-01-01"),max = ymd(max(final_data_1$Date)))) +
+  labs(title = "Volume Traded in Million $ of Top 10 Cryptocurrency by Market-Cap", x = "Date", y = "Volume(Million $)",color = "")
+
+ggplotly(crypto_volume_plot)
+```
+
+```{r}
+#Summary for the above (p25, median, p75, mean, count(N) and standard deviation)
+crypto_stats = get_summary(final_data,colnames(final_data)[2:length(colnames(final_data))])
+
+#Correlation heatmap for different crypto currencies.
+get_heatmap(final_data,colnames(final_data)[2:length(colnames(final_data))],"Crypto Volume Traded")
+
+#Plotting stacked charts over time
+plot_stacked_chart(final_data,colnames(final_data)[1:length(colnames(final_data))],"Crypto Volume Traded",1)
+
+#Plotting graphs against each of the economic indicators
+final_data[2:ncol(final_data)] = final_data[2:ncol(final_data)]/1000000000
+sheet_lists = list(final_data)
+sheet_name = list("Crypto Currency Plots Over Time")
+plot_all(sheet_lists,sheet_name,economic_indicators)
+
+```
